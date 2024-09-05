@@ -22,6 +22,11 @@ from rasterio.io import DatasetReader
 from rasterio.mask import mask
 from shapely.geometry import box
 
+import concurrent.futures
+import threading
+
+READ_LOCK = threading.Lock()
+
 # class img_data(DatasetReader):
 #    """
 #    Class for image data to be processed for tiling
@@ -183,6 +188,107 @@ def tile_data(
 
     print("Tiling complete")
 
+def parallel_tile_data(
+    data_path: str,
+    out_dir: str,
+    buffer: int = 30,
+    tile_width: int = 200,
+    tile_height: int = 200,
+    dtype_bool: bool = False,
+    max_workers: int = 4
+) -> None:
+    """Tiles up orthomosaic for making predictions on.
+
+    Tiles up full othomosaic into managable chunks to make predictions on. Use tile_data_train to generate tiled
+    training data. A bug exists on some input raster types whereby outputed tiles are completely black - the dtype_bool
+    argument should be switched if this is the case.
+
+    Args:
+        data_path: Path to orthomosaic
+        buffer: Overlapping buffer of tiles in meters (UTM)
+        tile_width: Tile width in meters
+        tile_height: Tile height in meters
+        dtype_bool: Flag to edit dtype to prevent black tiles
+        max_workers: Number of parallel threads to use in tiling
+
+    Returns:
+        None
+    """
+
+    out_path = Path(out_dir)
+    os.makedirs(out_path, exist_ok=True)
+    data = rasterio.open(data_path)
+    epsg = str(data.crs)
+    crs = epsg.split(":")[1]
+    tilename = Path(data.name).stem
+
+    tiles_minx = np.arange(data.bounds[0], data.bounds[2] - tile_width,
+                          tile_width, int)
+    tiles_miny = np.arange(data.bounds[1], data.bounds[3] - tile_height,
+                              tile_height, int)
+    
+    # All x and y combinations
+    mins_x_y = [
+        [minx, miny]
+        for minx in tiles_minx
+        for miny in tiles_miny
+    ]
+
+    # Split combinations into chunks for parallel processing
+    chunks = np.array_split(mins_x_y, max_workers)
+
+    map_kwargs = []
+
+    for i in range(len(chunks)):
+        map_kwargs.append({
+            "thread_id": i, 
+            "data": data, 
+            "filename": tilename,
+            "crs": crs,
+            "out_path": out_dir,
+            "min_coords": chunks[i],
+            "buffer": buffer,
+            "tile_width": tile_width,
+            "tile_height":tile_height,
+            "dtype_bool": dtype_bool
+        })
+
+    total_tiles = len(tiles_minx) * len(tiles_miny)
+    print(f"Total tiles: {total_tiles}")
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    results = pool.map(lambda kwargs: crop_and_save_tiles(**kwargs), map_kwargs)
+    pool.shutdown(wait=True)
+
+
+def crop_and_save_tiles(
+    thread_id: str,
+    data: DatasetReader,
+    filename: str,
+    crs: str,
+    out_path: Path,
+    min_coords: list,
+    buffer: int,
+    tile_width: int,
+    tile_height: int,
+    dtype_bool: bool) -> None:
+    """Crops and saves a tile from the orthomosaic.
+
+    Args:
+        data: Orthomosaic as a rasterio object in a UTM type projection
+        filename: Name of the orthomosaic
+        crs: EPSG code of the orthomosaic
+        out_path: Path to save the tiles
+        min_coords: Minimum coordinates (x, y) of the tile
+        buffer: Overlapping buffer of tiles in meters (UTM)
+        tile_width: Tile width in meters
+        tile_height: Tile height in meters
+        dtype_bool: Flag to edit dtype to prevent black tiles
+
+    Returns:
+        None
+    """
+    
 
 def tile_data_train(  # noqa: C901
     data: DatasetReader,
@@ -540,29 +646,31 @@ def to_traintest_folders(  # noqa: C901
 
 
 if __name__ == "__main__":
-    # Right let"s test this first with Sepilok 10cm resolution, then I need to try it with 50cm resolution.
-    img_path = "/content/drive/Shareddrives/detectreeRGB/benchmark/Ortho2015_benchmark/P4_Ortho_2015.tif"
-    crown_path = "gdrive/MyDrive/JamesHirst/NY/Buffalo/Buffalo_raw_data/all_crowns.shp"
-    out_dir = "./"
-    # Read in the tiff file
-    # data = img_data.open(img_path)
-    # Read in crowns
-    data = rasterio.open(img_path)
-    crowns = gpd.read_file(crown_path)
-    print(
-        "shape =",
-        data.shape,
-        ",",
-        data.bounds,
-        "and number of bands =",
-        data.count,
-        ", crs =",
-        data.crs,
-    )
+    img_path = "F:\\bioflore\\imgs\\img_for_test.tif"
+    parallel_tile_data(img_path, 'tiles', 30, 60, 60)
+    # # Right let"s test this first with Sepilok 10cm resolution, then I need to try it with 50cm resolution.
+    # img_path = "/content/drive/Shareddrives/detectreeRGB/benchmark/Ortho2015_benchmark/P4_Ortho_2015.tif"
+    # crown_path = "gdrive/MyDrive/JamesHirst/NY/Buffalo/Buffalo_raw_data/all_crowns.shp"
+    # out_dir = "./"
+    # # Read in the tiff file
+    # # data = img_data.open(img_path)
+    # # Read in crowns
+    # data = rasterio.open(img_path)
+    # crowns = gpd.read_file(crown_path)
+    # print(
+    #     "shape =",
+    #     data.shape,
+    #     ",",
+    #     data.bounds,
+    #     "and number of bands =",
+    #     data.count,
+    #     ", crs =",
+    #     data.crs,
+    # )
 
-    buffer = 20
-    tile_width = 200
-    tile_height = 200
+    # buffer = 20
+    # tile_width = 200
+    # tile_height = 200
 
-    tile_data_train(data, out_dir, buffer, tile_width, tile_height, crowns)
-    to_traintest_folders(folds=5)
+    # tile_data_train(data, out_dir, buffer, tile_width, tile_height, crowns)
+    # to_traintest_folders(folds=5)
