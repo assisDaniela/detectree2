@@ -288,7 +288,94 @@ def crop_and_save_tiles(
     Returns:
         None
     """
+
+    writer_thread = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+    for minx, miny in min_coords:
+        # Naming conventions
+        out_path_root = Path(out_path) / f"{filename}_{minx}_{miny}_{tile_width}_{buffer}_{crs}"
+
+        # define the bounding box of the tile
+        bbox = box(
+            minx - buffer,
+            miny - buffer,
+            minx + tile_width + buffer,
+            miny + tile_height + buffer,
+        )
+        
+        # turn the bounding boxes into geopandas DataFrames
+        geo = gpd.GeoDataFrame({"geometry": bbox}, index=[0], crs=data.crs)
+        
+        # here we are cropping the tiff to the bounding box of the tile we want
+        coords = get_features(geo)
+
+        # accessing shared data
+        with READ_LOCK:
+            out_img, out_transform = mask(data, shapes=coords, crop=True)
+
+        # discard scenes with many out-of-range pixels
+        out_sumbands = np.sum(out_img, 0)
+        zero_mask = np.where(out_sumbands == 0, 1, 0)
+        nan_mask = np.where(out_sumbands == 765, 1, 0)
+        sumzero = zero_mask.sum()
+        sumnan = nan_mask.sum()
+        totalpix = out_img.shape[1] * out_img.shape[2]
+        if sumzero > 0.25 * totalpix:
+            continue
+        elif sumnan > 0.25 * totalpix:
+            continue
+
+        # creating tile meta
+        out_meta = data.meta.copy()
+        out_meta.update({
+            "driver": "GTiff",
+            "height": out_img.shape[1],
+            "width": out_img.shape[2],
+            "transform": out_transform,
+            "nodata": None,
+        })
+
+        # dtype needs to be unchanged for some data and set to uint8 for others
+        if dtype_bool:
+            out_meta.update({"dtype": "uint8"})
+
+        # Saving the tile as a new tiff, named by the origin of the tile.
+        out_tif = out_path_root.with_suffix(out_path_root.suffix + ".tif")
+        writer_thread.submit(write_tile, out_img, out_meta, out_tif, out_path_root)
+
+def write_tile(
+    img: np.ndarray,
+    img_meta: dict,
+    img_path: str,
+    out_path_root: str
+) -> None:
+    """Writes a tile to disk.
+
+    Args:
+        img: Tile as a numpy array
+        img_meta: Metadata for the tile
+        img_path: Path to save the tile
+        out_path_root: Root path for the tile
+
+    Returns:
+        None
+    """
+    with rasterio.open(img_path, "w", **img_meta) as dest:
+        dest.write(img)
     
+    rgb = np.dstack((img[2], img[1], img[0]))  # BGR for cv2
+
+    if np.max(img[1]) > 255:
+        rgb_rescaled = 255 * rgb / 65535
+    else:
+        rgb_rescaled = rgb  # scale to image
+
+    # save this as jpg or png...we are going for png...again, named with the origin of the specific tile
+    # here as a naughty method
+    cv2.imwrite(
+        str(out_path_root.with_suffix(out_path_root.suffix + ".png").resolve()),
+        rgb_rescaled,
+    )
 
 def tile_data_train(  # noqa: C901
     data: DatasetReader,
